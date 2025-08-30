@@ -1,0 +1,200 @@
+Make sure to credit me for this I made these in 2 months
+import discord
+from discord.ext import commands
+import re
+import aiohttp
+import traceback
+
+# === Bot Setup ===
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# === Helper: Send to Mod Log ===
+async def log_action(guild, message):
+    log_channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    if not log_channel:
+        log_channel = await guild.create_text_channel("mod-logs")
+    await log_channel.send(message)
+
+# === Roblox Banlist Check ===
+async def check_roblox_banlist(username):
+    api_url = f"https://api.rtrack.social/v1/users/{username}"  # Placeholder API
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("isBanned") or data.get("banStatus") == "banned":
+                        return True, "⚠️ **Flagged on Roblox banlist**"
+                    else:
+                        return False, "✅ No ban record found"
+                else:
+                    return None, f"❓ Could not check banlist (status {resp.status})"
+    except Exception as e:
+        return None, f"❌ Error checking banlist: {e}"
+
+# === Events ===
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    for guild in bot.guilds:
+        if not discord.utils.get(guild.roles, name="Flagged"):
+            await guild.create_role(name="Flagged", colour=discord.Colour.red())
+        if not discord.utils.get(guild.text_channels, name="mod-logs"):
+            await guild.create_text_channel("mod-logs")
+
+@bot.event
+async def on_guild_remove(guild):
+    owner = (await bot.application_info()).owner
+    if owner:
+        try:
+            await owner.send(f"⚠️ Bot removed from server: **{guild.name}** (ID: {guild.id})")
+        except discord.Forbidden:
+            print("❌ Could not DM owner about removal.")
+
+@bot.event
+async def on_command_error(ctx, error):
+    error_msg = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    await log_action(ctx.guild, f"❌ Error in command `{ctx.command}`: ```\n{error_msg}\n```")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # Predator watchlist
+    flagged_words = ["send nudes", "snapchat", "age?", "cam", "pred"]
+    for word in flagged_words:
+        if word in message.content.lower():
+            await log_action(message.guild, f"⚠️ **Flagged**: {message.author} said: {message.content}")
+
+    # Roblox detection
+    roblox_link_pattern = r"(https?:\/\/)?(www\.)?roblox\.com\/users\/(\d+)\/profile"
+    roblox_username_pattern = r"\b[Rr]oblox\s?[Uu]ser(name)?:?\s?([A-Za-z0-9_]{3,20})\b"
+
+    link_match = re.search(roblox_link_pattern, message.content)
+    if link_match:
+        user_id = link_match.group(3)
+        profile_url = f"https://www.roblox.com/users/{user_id}/profile"
+        await log_action(message.guild, f"🔍 Roblox profile link posted by {message.author}: {profile_url}")
+
+    match = re.search(roblox_username_pattern, message.content)
+    if match:
+        username = match.group(2)
+        profile_url = f"https://www.roblox.com/users/profile?username={username}"
+        await log_action(message.guild, f"🔍 Roblox username mentioned by {message.author}: `{username}` — checking banlist...")
+        flagged, result = await check_roblox_banlist(username)
+        await log_action(message.guild, f"📊 Banlist check for `{username}`: {result}")
+
+        if flagged:
+            owner = (await bot.application_info()).owner
+            if owner:
+                try:
+                    await owner.send(
+                        f"🚨 **ALERT:** Roblox account `{username}` flagged on banlist.\n"
+                        f"Posted by: {message.author}\n"
+                        f"Message: {message.content}\n"
+                        f"🔗 Profile: {profile_url}"
+                    )
+                except discord.Forbidden:
+                    await log_action(message.guild, "❌ Could not DM owner — check bot's DM permissions.")
+
+            flagged_role = discord.utils.get(message.guild.roles, name="Flagged")
+            if flagged_role:
+                try:
+                    await message.author.add_roles(flagged_role, reason="Roblox account flagged on banlist")
+                except discord.Forbidden:
+                    await log_action(message.guild, "❌ Could not assign Flagged role — check role hierarchy.")
+
+    await bot.process_commands(message)
+
+# === Moderation Commands ===
+@bot.command()
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, member: discord.Member, *, reason=None):
+    await member.kick(reason=reason)
+    await ctx.send(f"👢 {member} kicked. Reason: {reason or 'No reason'}")
+    await log_action(ctx.guild, f"👢 {member} kicked by {ctx.author}. Reason: {reason or 'No reason'}")
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, member: discord.Member, *, reason=None):
+    await member.ban(reason=reason)
+    await ctx.send(f"⛔ {member} banned. Reason: {reason or 'No reason'}")
+    await log_action(ctx.guild, f"⛔ {member} banned by {ctx.author}. Reason: {reason or 'No reason'}")
+
+@bot.command()
+@commands.has_permissions(ban_members=True)
+async def unban(ctx, *, member_name):
+    banned_users = await ctx.guild.bans()
+    for ban_entry in banned_users:
+        user = ban_entry.user
+        if (user.name + "#" + user.discriminator) == member_name:
+            await ctx.guild.unban(user)
+            await ctx.send(f"♻️ Unbanned {member_name}")
+            await log_action(ctx.guild, f"♻️ {member_name} unbanned by {ctx.author}")
+            return
+    await ctx.send("❌ User not found.")
+
+@bot.command()
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int):
+    await ctx.channel.purge(limit=amount+1)
+    await ctx.send(f"🧹 Cleared {amount} messages.", delete_after=5)
+    await log_action(ctx.guild, f"🧹 {ctx.author} cleared {amount} messages in #{ctx.channel}")
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def mute(ctx, member: discord.Member, *, reason=None):
+    muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if not muted_role:
+        muted_role = await ctx.guild.create_role(name="Muted")
+        for channel in ctx.guild.channels:
+            await channel.set_permissions(muted_role, speak=False, send_messages=False)
+    await member.add_roles(muted_role, reason=reason)
+    await ctx.send(f"🔇 {member} muted. Reason: {reason or 'No reason'}")
+    await log_action(ctx.guild, f"🔇 {member} muted by {ctx.author}. Reason: {reason or 'No reason'}")
+
+@bot.command()
+@commands.has_permissions(manage_roles=True)
+async def unmute(ctx, member: discord.Member):
+    muted_role = discord.utils.get(ctx.guild.roles, name="Muted")
+    if muted_role in member.roles:
+        await member.remove_roles(muted_role)
+        await ctx.send(f"🔊 {member} unmuted.")
+        await log_action(ctx.guild, f"🔊 {member} unmuted by {ctx.author}")
+    else:
+        await ctx.send("❌ That member isn't muted.")
+
+# === Cybersecurity Teaching Commands ===
+@bot.command()
+async def bruteforce(ctx):
+    username = "admin"
+    real_password = "securepass"
+    guesses = ["123456", "password", "admin123", "securepass", "letmein"]
+    found = None
+    for attempt in guesses:
+        await ctx.send(f"Trying password: {attempt}")
+        if attempt == real_password:
+            found = attempt
+            break
+    if found:
+        await ctx.send(f"✅ Password found: **{found}**")
+    else:
+        await ctx.send("❌ Failed to find the password.")
+
+@bot.command()
+async def sqlinjection(ctx):
+    user_input_name = "admin"
+    user_input_pass = "' OR '1'='1"
+    query = f"SELECT * FROM users WHERE name = '{user_input_name}' AND pass = '{user_input_pass}'"
+    await ctx.send(f"🧨 Vulnerable query:\n```sql\n{query}\n```")
+    await ctx.send("⚠️ Shows how unsanitized inputs can bypass login forms.")
+# === all your bot code above here ===
+# (events, commands, Roblox checks, etc.)
+
+# === RUN THE BOT ===
+# ⬇️ ⬇️ ⬇️  PASTE YOUR DISCORD BOT TOKEN BETWEEN THE QUOTES BELOW  ⬇️ ⬇️ ⬇️
+bot.run ("YOUR_BOT_TOKEN")    
