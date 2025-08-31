@@ -6,4 +6,5 @@ This is made by me almost all of it and little bit of it is ai coded but I alrea
 Good luck when using this bot
 That's all I can say Goodbye
 Btw this is only create by pydroid so if you see the Bot offline make sure to dm me
-It's not verified yet by discord since I need to pass identity verification ;-;
+It's now verified by discord :D
+btw the link is on the other file
